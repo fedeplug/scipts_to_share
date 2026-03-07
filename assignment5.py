@@ -409,12 +409,7 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
         #remember to adjust the code so that 
         r = dR[i] #find the infinitesimal radious
         c = chord_dist[i]
-        W_r = Omega * r* ( 1 - a_prime[i]) #find the velocity in the azimuthal direction
-           
-        U_r = U_inf * (1 + a[i])
         
-        V_r = np.sqrt(W_r**2 + U_r**2 + 1e-9)  #this will be used to calculate the CD
-        phi = np.atan2(U_r, W_r + 1e-19)
 
         #now we search for the polars (outside of the while, faster) based on the closest to station
         station_req = r / inches_to_m
@@ -438,7 +433,12 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
         while iter < n_iterations and converged == False:
 
             
+            W_r = Omega * r* ( 1 - a_prime[i]) #find the velocity in the azimuthal direction
+           
+            U_r = U_inf * (1 + a[i])
             
+            V_r = np.sqrt(W_r**2 + U_r**2 + 1e-9)  #this will be used to calculate the CD
+            phi = np.atan2(U_r, W_r + 1e-19)
             search_dict = {
                 'station_idx' : r / inches_to_m,
                 'rpm' : rpm,
@@ -683,6 +683,7 @@ if __name__ == '__main__':
             J_exp = group['J'].values
             Ct_exp = group['Ct'].values
             Cp_exp = group['Cp'].values
+
             eta_exp = group['Pe'].values
             
             print(f"Validating Mach {name} - {len(U_inf_array)} discrete points.")
@@ -736,3 +737,16 @@ if __name__ == '__main__':
 
             plt.tight_layout()
             plt.show()
+
+
+'''
+sigma_prime = (Nb * c) / (2 * np.pi * r)
+
+            Cy = Cl *np.cos(phi) - Cd * np.sin(phi)
+            Cx = Cl *np.sin(phi) + Cd * np.cos(phi)
+            eps = 1e-9
+            denom_a = 4 * F * np.sin(phi)**2 - sigma_prime*Cy + eps
+            denom_aprime = 4 * F * np.sin(phi) *np.cos(phi) + sigma_prime*Cx + eps
+            a_guess = sigma_prime*Cy / denom_a
+            a_prime_guess = sigma_prime*Cx / denom_aprime
+'''
