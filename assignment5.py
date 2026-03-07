@@ -291,37 +291,9 @@ def find_nearest_station(df, station, U_inf, rpm):
     return df_sub.loc[idx, "station_idx"]
 
 
-def interpolate_Cl_Cd_curves_viterna(df, data_dict, alpha_real, AR):
+def interpolate_Cl_Cd_curves_viterna( alpha_real, alpha_data, Cl_data, Cd_data, AR):
     
     Cd0_Clarky = 0.023
-
-    df["station_idx"] = pd.to_numeric(df["station_idx"])
-    df["U_inf"] = pd.to_numeric(df["U_inf"])
-    
-    df["rpm"] = pd.to_numeric(df["rpm"]).astype(int)
-
-    k = 0.045 
-    station_req = data_dict['station_idx']
-    rpm = data_dict['rpm']
-    U_inf_kph = data_dict['U_inf_kph']
- 
-    #the combination of these masks should give only a single polar... then interp and apply corrections
-
-    station_use = find_nearest_station(df, station_req, U_inf_kph, rpm)
-
-    df_polar = df[
-            (df["station_idx"] == station_use) &
-            (df["rpm"] == int(rpm)) &
-            (np.isclose(df["U_inf"], U_inf_kph, atol=0.5))
-        ]
-    alpha_data = df_polar['alpha']
-    Cl_data = df_polar['CL']
-    Cd_data = df_polar['CD']
-    #manage case in which Re was too low, and we did an inviscid analysis
-    if (Cd_data == 0).all():
-        #all are 0, it was inviscid
-        Cd_data = Cd0_Clarky + k*(Cl_data**2)  #should work since it is numpy
-        #remember, some issues with this formula: clarky does not use Clnormal but ok, also Cd0 and k are "hypotetical"
     #regression or corrections, remember that interp automatically manages the case where the data is already there 
     if alpha_real > np.min(alpha_data) and alpha_real < np.max(alpha_data) : #it is "in the curve"
         Cl_real = np.interp(alpha_real, alpha_data, Cl_data) #work with linear interp, since data is assumed to be "perfect" (from XFOIL)
@@ -329,10 +301,10 @@ def interpolate_Cl_Cd_curves_viterna(df, data_dict, alpha_real, AR):
     else:
         #params for viterna
         Cd_max = 1.11 + 0.018* AR
-        idx_stall = alpha_data.idxmax()
-        Cl_stall = Cl_data.loc[idx_stall]
-        Cd_stall = Cd_data.loc[idx_stall]
-        alpha_max = alpha_data.loc[idx_stall]
+        idx_stall = alpha_data.argmax()
+        Cl_stall = Cl_data[idx_stall]
+        Cd_stall = Cd_data[idx_stall]
+        alpha_max = alpha_data[idx_stall]
         alpha_max_rad = np.deg2rad(alpha_max)
 
         alpha_real_rad = np.deg2rad(alpha_real)
@@ -349,26 +321,35 @@ def interpolate_Cl_Cd_curves_viterna(df, data_dict, alpha_real, AR):
     return Cl_real, Cd_real
     
 
-def PrandtlTipRootCorrection(r_R, rootradius_R, tipradius_R, TSR, NBlades, axial_induction):
-    eps = 1e-6
-    a = np.clip(axial_induction, -0.2, 0.95)
-
-    temp_tip = -NBlades/2 * (tipradius_R-r_R)/(r_R+eps) * np.sqrt(1 + (TSR*r_R)**2/(1-a)**2)
+def PrandtlTipRootCorrection(r_R, rootradius_R, tipradius_R, NBlades, phi):
+    eps = 1e6
+    temp_tip = -(NBlades/2) * (tipradius_R-r_R)/(r_R * np.sin(phi) + eps)
     temp_tip = np.clip(temp_tip, -50, 50)
-    Ftip = 2/np.pi * np.arccos(np.exp(temp_tip))
+    Ftip = 2/np.pi * np.arccos(np.exp(temp_tip)) 
 
-    temp_root = NBlades/2 * (rootradius_R-r_R)/(r_R+eps) * np.sqrt(1 + (TSR*r_R)**2/(1-a)**2)
+    temp_root = NBlades/2 * (rootradius_R-r_R)/(r_R * np.sin(phi) + eps)
     temp_root = np.clip(temp_root, -50, 50)
     Froot = 2/np.pi * np.arccos(np.exp(temp_root))
 
     F = np.clip(Ftip*Froot, 1e-3, 1.0)
     return F, Ftip, Froot
 
-
-def find_omega_for_thrust(T_target, U_inf,Nb, chord_dist, theta_dist, dR, AR, cl_cd_df, Omega_min=10, Omega_max=500):
+def find_omega_for_thrust(T_target, U_inf, Nb, chord_dist, theta_dist, dR, AR, cl_cd_df, Omega_min=1, Omega_max=3000):
     def f(Omega):
-        _, _, _, _, _, Thrust, _, _ = solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df)
-        return Thrust - T_target
+        # We only need the Thrust index (6th return value)
+        results = solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df)
+        thrust = results[5] 
+        return thrust - T_target
+
+    # Check if the target is within the bounds to avoid the Brentq crash
+    f_min = f(Omega_min)
+    f_max = f(Omega_max)
+
+    if f_min * f_max > 0:
+        # If both are negative, the prop is too small/slow to reach target thrust
+        # If both are positive, it's already producing too much thrust
+        print(f"Warning: Target thrust {T_target}N not reachable at U_inf={U_inf:.2f} m/s. Returning boundary.")
+        return Omega_max if f_max < 0 else Omega_min
 
     Omega_solution = brentq(f, Omega_min, Omega_max)
     return Omega_solution
@@ -376,7 +357,7 @@ def find_omega_for_thrust(T_target, U_inf,Nb, chord_dist, theta_dist, dR, AR, cl
 
 def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
     #remember, the Cl works with alfa, but the alfa and phi are NOT the same angle
-    U_inf_kph = U_inf / 0.44704
+    U_inf_kph = max( U_inf / 0.44704, 0.01)
     iter = 0
     n = Omega / (2*np.pi)
     inches_to_m = 2.54 / 100
@@ -392,7 +373,7 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
     A_r = np.pi * (prop_diam/2) **2 #Area of the rotor (assuming all blade)
 
     rpm = int(round(Omega * 60 / (2*np.pi)))
-    tsr = Omega * prop_radius / U_inf
+    
     # T = 2 * rho *(U_inf - U_r)*U_r*A_r   # it is the same as doing the C_t later
     # C_t_2 = T / (0.5 * rho * A_r * U_inf**2)
 
@@ -402,26 +383,61 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
     #important: instead of converging all together, the idea is that cross interactions
     #are not important, this means we can converge annuli separately
 
-  
+
+    #filter the df for the operating point, with the closest that we see
+    available_rpms = cl_cd_df['rpm'].unique()
+    closest_rpm = available_rpms[np.argmin(np.abs(available_rpms - rpm))]
+    df_rpm = cl_cd_df[cl_cd_df['rpm'] == closest_rpm]
+    available_uinf = df_rpm['U_inf'].unique()
+    closest_uinf = available_uinf[np.argmin(np.abs(available_uinf - U_inf_kph))]
+    df_op_point = df_rpm[df_rpm['U_inf'] == closest_uinf].copy()
+    if df_op_point.empty:
+        #means that maybe the we didn't have the analysis
+        print(f'Warning: No analysis present for the case U_inf = {U_inf_kph}, rpm = {rpm}')
+        return 0,0,0,0,0,0,0,0
+    Thrust = 0
+    Torque = 0
+
+   
     converged = False
     Thrust = 0
     Torque = 0
     Power = 0
     for i in range(0, len(dR)):  #we want it to start at 1 since the calculation is in SEGMENTS
         iter = 0
-        converged = False
         dr = dR[i] - dR[i-1] if i > 0 else dR[1] - dR[0]
+        #remember to adjust the code so that 
+        r = dR[i] #find the infinitesimal radious
+        c = chord_dist[i]
+        W_r = Omega * r* ( 1 - a_prime[i]) #find the velocity in the azimuthal direction
+           
+        U_r = U_inf * (1 + a[i])
+        
+        V_r = np.sqrt(W_r**2 + U_r**2 + 1e-9)  #this will be used to calculate the CD
+        phi = np.atan2(U_r, W_r + 1e-19)
+
+        #now we search for the polars (outside of the while, faster) based on the closest to station
+        station_req = r / inches_to_m
+        idx = (df_op_point['station_idx'] - station_req).abs().idxmin()
+        station_use = df_op_point.loc[idx, "station_idx"]  #we select the correct index of the df
+        df_polar = df_op_point[df_op_point['station_idx'] == station_use] #mask
+        
+        alpha_data = df_polar['alpha'].values
+        Cl_data = df_polar['CL'].values
+        Cd_data = df_polar['CD'].values
+
+        #now we need to handle the inviscid case (Re was too low for calculation)
+        if (Cd_data == 0).all():
+            #use the simple version
+            Cd0_Clarky = 0.023
+            Cd_data = Cd0_Clarky + 0.045*(Cl_data**2)   #the classic formula
+        
+        #now we enter the loop 
+        iter = 0
+        converged = False
         while iter < n_iterations and converged == False:
 
-            #remember to adjust the code so that 
-            r = dR[i] #find the infinitesimal radious
-            c = chord_dist[i]
-            W_r = Omega * r* ( 1 - a_prime[i]) #find the velocity in the azimuthal direction
-           
-            U_r = U_inf * (1 + a[i])
-        
-            V_r = np.sqrt(W_r**2 + U_r**2 + 1e-9)  #this will be used to calculate the CD
-            phi = np.atan2(U_r, W_r + 1e-19)
+            
             
             search_dict = {
                 'station_idx' : r / inches_to_m,
@@ -434,7 +450,7 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             alfa_search = np.rad2deg(alfa_rad)
           
 
-            Cl, Cd = interpolate_Cl_Cd_curves_viterna(cl_cd_df, search_dict, alfa_search, AR )
+            Cl, Cd = interpolate_Cl_Cd_curves_viterna(alfa_search, alpha_data, Cl_data, Cd_data, AR)
 
                
             Lift = Cl * 0.5 * rho * V_r**2 * c  #per unit area? or not?
@@ -448,10 +464,9 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             dF_azimuthal = Lift*np.sin(phi) + Drag*np.cos(phi)
             dT  = Nb * dF_axial   #not only infinitesimal force, but also radius (needs to be multiplied)
             dQ = Nb*dF_azimuthal * r
-            
             # Ct locale basato sulla sezione (annulus)
             
-            F, _, _ = PrandtlTipRootCorrection(r/prop_radius, hub_radius/prop_radius, 1.0,tsr,Nb,a[i])
+            F, _, _ = PrandtlTipRootCorrection(r/prop_radius, hub_radius/prop_radius, 1.0, Nb, phi)
 
             F = max(F, 1e-4)  # sicurezza numerica
             # now we have a difference, can use formulas from rotoe/wake or course. we will use course
@@ -478,15 +493,11 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             a_prime[i] = a_prime_new
             iter +=1
             if abs(a_comp[i] - a[i]) < tol and abs(a_prime_comp[i] - a_prime[i])< tol:
-                print('convergence achieved. exiting')
                 converged = True
 
         
         Thrust += dT * dr
         Torque += dQ * dr
-
-    
-        print(f'sub-iteration at {i} over {len(dR)} completed')
         
         iter = 0
         
@@ -497,7 +508,6 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
     Power = Torque * Omega
     J = U_inf / (n*prop_diam)
     eta = (J * Ct) / (2 * np.pi * Cq)
-    print(f'solved a BEM cycle at {U_inf}, Ct = {Ct}, Cp = {Cq} ')
     return Ct, Cq, Cp, eta, J, Thrust, Torque, Power
 
 
@@ -573,83 +583,156 @@ if __name__ == '__main__':
     compressible_campaign = full_campaign[~incompressible_mask] #this not
 
     for name, group in incompressible_campaign.groupby('Mach'):
-
+        print(f'we are at Mach: {name}')
         J_ratio = group['J']
         Ct_bem = []
         Cp_bem = []
         eta_bem = []
         Cq_bem = []
-        U_inf = group['V']
-        print(U_inf)
-        perf = group['Pe']
-        rpm = group['RPM']
+        U_inf_array = group['V'].values
+        
+        perf = group['Pe'].values
+        rpm_array = group['RPM'].values
         Ct_exp = group['Ct']
         Cp_exp = group['Cp']
         Cq_exp = Cp_exp / (2*np.pi)
-        Power_exp = group['PWR(W)']
+        P_exp = group['PWR(W)']
+        T_exp = group['Thrust(N)']
 
         eta_lst = []
-        scale_lst = [0.8, 0.9, 1.0, 1.1, 1.2]
-        for scale in scale_lst:
-            dR_new = dR * scale
-    
-
-            Omega = find_omega_for_thrust(0.08, U_inf, Nb, chord_dist, theta_dist, dR_new, AR, U_inf, cl_cd_df)
-            Ct, Cq, Cp, eta, J, Thrust, Torque, Power = solve_BEM(Nb, chord_dist, theta_dist, dR_new, AR, U_inf, Omega, cl_cd_df )
-
-            eta_lst.append(eta)
+        #scale_lst = [0.8, 0.9, 1.0, 1.1, 1.2]
+        scale_lst = [1]  #use this to produce the result without varying the geometry
+        if len(scale_lst) >1:
+            for scale in scale_lst:
+                
+                J_curve = []
+                eta_curve = []
+                Ct_curve = []
+                dR_new = dR * scale
+                print(f'we are working with a radius of r = {dR_new}')
+                for i in range(len(U_inf_array)):
+                    if i%10 ==0:
+                        print(f'working with velocity n = {i} of a total of {len(U_inf_array)}')
+                    U_inf_raw = float(U_inf_array[i])
             
-        plt.figure(figsize=(8, 5), dpi=120)
+                    U_inf =max(U_inf_raw, 0.01)
+                    rpm = rpm_array[i]
+                    Omega = find_omega_for_thrust(0.08, U_inf, Nb, chord_dist, theta_dist, dR_new, AR, cl_cd_df)
+                    Ct, Cq, Cp, eta, J, Thrust, Torque, Power = solve_BEM(Nb, chord_dist, theta_dist, dR_new, AR, U_inf, Omega, cl_cd_df )
 
-        plt.plot(
-                scale_lst, eta_lst,
-                linestyle='-',
-                color = 'green',
-                linewidth=2.0,
-                marker='s',
-                markersize=6,
-                label='Power scaling diam'
-            )
-           
-            # -----------------------------
-            # LABEL & TITOLO
-            # -----------------------------
-        plt.xlabel('diameter', fontsize=12)
-        plt.ylabel(' efficiency', fontsize=12)
-        plt.title('Variation of efficiency with diameter ', fontsize=14, fontweight='bold')
+                    eta_lst.append(eta)
+                    J_curve.append(J)
+                    eta_curve.append(eta)
+                    Ct_curve.append(Ct)
+                plt.plot(J_curve, eta_curve, marker='o', label=f'Scale {scale} (D={2*dR_new[-1] * 2}m)')
 
-            # -----------------------------
-            # GRIGLIA
-            # -----------------------------
-        plt.grid(
-                which='both',
-                linestyle='--',
-                linewidth=0.7,
-                alpha=0.6
-            )
 
-            # -----------------------------
-            # LEGENDA
-            # -----------------------------
-        plt.legend(
-                fontsize=11,
-                loc='best',
-                frameon=True,
-                edgecolor='black'
-            )
+                # -----------------------------
+                # LABEL & TITOLO
+                # -----------------------------
+            plt.xlabel('diameter', fontsize=12)
+            plt.ylabel(' efficiency', fontsize=12)
+            plt.title('Variation of efficiency with diameter ', fontsize=14, fontweight='bold')
 
-            # -----------------------------
-            # TICKS
-            # -----------------------------
-        plt.tick_params(
-                axis='both',
-                which='major',
-                labelsize=11,
-                direction='in'
-            )
+                # -----------------------------
+                # GRIGLIA
+                # -----------------------------
+            plt.grid(
+                    which='both',
+                    linestyle='--',
+                    linewidth=0.7,
+                    alpha=0.6
+                )
 
-            # -----------------------------
-            # MARGINI
-            # -----------------------------
-        plt.tight_layout()
+                # -----------------------------
+                # LEGENDA
+                # -----------------------------
+            plt.legend(
+                    fontsize=11,
+                    loc='best',
+                    frameon=True,
+                    edgecolor='black'
+                )
 
+                # -----------------------------
+                # TICKS
+                # -----------------------------
+            plt.tick_params(
+                    axis='both',
+                    which='major',
+                    labelsize=11,
+                    direction='in'
+                )
+
+                # -----------------------------
+                # MARGINI
+                # -----------------------------
+            plt.tight_layout()
+            plt.show()
+
+        else:
+            # 1. Setup Geometry
+            scale = scale_lst[0]
+            dR_new = dR * scale
+            # Important: Ensure D_scaled matches the experimental D
+            prop_diam = dR_new[-1] * 2 
+            
+            J_bem, eta_bem, Ct_bem, Cp_bem , T_bem, P_bem = [], [], [], [], [], []
+            
+            # 2. Extract Experimental Vectors
+            J_exp = group['J'].values
+            Ct_exp = group['Ct'].values
+            Cp_exp = group['Cp'].values
+            eta_exp = group['Pe'].values
+            
+            print(f"Validating Mach {name} - {len(U_inf_array)} discrete points.")
+
+            for i in range(len(U_inf_array)):
+                # Use the EXACT same physical conditions as the test
+                U_inf = float(U_inf_array[i])
+                rpm_val = rpm_array[i]
+                Omega_real = rpm_val * 2 * np.pi / 60
+                
+                # Run BEM for this specific point
+                # Ensure Nb, chord_dist, etc., are the baseline ones
+                Ct, Cq, Cp, eta, J, Thrust_bem, Torque_bem, Power_bem = solve_BEM(
+                    Nb, chord_dist, theta_dist, dR_new, AR, U_inf, Omega_real, cl_cd_df
+                )
+                
+                # If solve_BEM failed (returned 0s), skip it or append NaN
+                if J == 0 and U_inf > 0:
+                    J_bem.append(np.nan); eta_bem.append(np.nan)
+                    Ct_bem.append(np.nan); Cp_bem.append(np.nan)
+                    T_bem.append(np.nan); P_bem.append(np.nan)
+                else:
+                    J_bem.append(J)
+                    eta_bem.append(eta)
+                    Ct_bem.append(Ct)
+                    Cp_bem.append(Cp)
+                    T_bem.append(Torque_bem)
+                    P_bem.append(Power_bem)
+
+            # --- PLOTTING ---
+            fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+            fig.suptitle(f'Point-to-Point Validation: Mach {name}', fontsize=14)
+
+            metrics = [
+                (T_bem, T_exp, '$C_t$', 'blue'),
+                (P_bem, P_exp, '$C_p$', 'green'),
+                (eta_bem, eta_exp, '$\eta$', 'black')
+            ]
+
+            for ax, (bem, exp, label, col) in zip(axs, metrics):
+                # We use markers for both to see the X-axis alignment
+                ax.plot(J_bem, bem, 'o-', label='BEM Result', color=col, alpha=0.7)
+                ax.scatter(J_exp, exp, marker='x', color='red', label='Experimental', s=50, zorder=3)
+                
+                ax.set_xlabel('Advance Ratio $J$')
+                ax.set_ylabel(label)
+                # Set X-limit to match the experiments exactly
+                ax.set_xlim(min(J_exp)*0.9, max(J_exp)*1.1)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.show()
