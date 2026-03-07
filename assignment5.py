@@ -465,6 +465,13 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             dT  = Nb * dF_axial   #not only infinitesimal force, but also radius (needs to be multiplied)
             dQ = Nb*dF_azimuthal * r
             # Ct locale basato sulla sezione (annulus)
+
+            sigma_prime = (Nb * c) / (2 * np.pi * r)
+
+            Cy = Cl *np.cos(phi) - Cd * np.sin(phi)
+            Cx = Cl *np.sin(phi) + Cd * np.cos(phi)
+            eps = 1e-9
+            
             
             F, _, _ = PrandtlTipRootCorrection(r/prop_radius, hub_radius/prop_radius, 1.0, Nb, phi)
 
@@ -472,10 +479,10 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             # now we have a difference, can use formulas from rotoe/wake or course. we will use course
             #the one from the course are from mass flow
 
-            a_guess = dT / (2 * 2*np.pi * r * rho * U_inf**2 * (1 + a[i]) * F )
-
-            a_prime_guess = dQ / (2*2 *np.pi * r**3 * Omega   * rho * U_inf *  (1+a[i])* F)
-
+            denom_a = abs(4 * F * np.sin(phi)**2 - sigma_prime*Cy) + eps
+            denom_aprime = abs(4 * F * np.sin(phi) *np.cos(phi) + sigma_prime*Cx )+ eps
+            a_guess = sigma_prime*Cy / denom_a
+            a_prime_guess = sigma_prime*Cx / denom_aprime
             
     
 
@@ -484,8 +491,8 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
         
             a_prime_new = 0.7*a_prime[i] + 0.3 * a_prime_guess
 
-            a_new = np.clip(a_new, -0.2, 0.95)
-            a_prime_new = np.clip(a_prime_new, -1.0, 1.0)
+            a_new = np.clip(a_new, -0.1, 100000)
+            a_prime_new = np.clip(a_prime_new, -0.05, 0.15)
         
             a_comp[i] = a[i]
             a_prime_comp[i] = a_prime[i]
