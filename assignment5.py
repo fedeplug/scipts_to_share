@@ -709,7 +709,7 @@ if __name__ == '__main__':
                     eta_bem.append(eta)
                     Ct_bem.append(Ct)
                     Cp_bem.append(Cp)
-                    T_bem.append(Torque_bem)
+                    T_bem.append(Thrust_bem)
                     P_bem.append(Power_bem)
 
             # --- PLOTTING ---
@@ -717,8 +717,8 @@ if __name__ == '__main__':
             fig.suptitle(f'Point-to-Point Validation: Mach {name}', fontsize=14)
 
             metrics = [
-                (T_bem, T_exp, '$C_t$', 'blue'),
-                (P_bem, P_exp, '$C_p$', 'green'),
+                (Ct_bem, Ct_exp, '$C_t$', 'blue'),
+                (Cp_bem, Cp_exp, '$C_p$', 'green'),
                 (eta_bem, eta_exp, '$\eta$', 'black')
             ]
 
