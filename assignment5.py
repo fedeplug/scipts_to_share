@@ -14,198 +14,10 @@ from collections import defaultdict
 from scipy.optimize import brentq
 # BEM : union between momentum theory (with also induction factor in radial direction) and loads from blade elements
 
-
-
-def parse_xfoil_polar(filepath):
-    """Legge TUTTE le righe del file polare prodotto da XFOIL"""
-    data = []
-    if not os.path.exists(filepath):
-        return data
-        
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
-        
-    # In theory the xfoil out data are all the same, they have ---- and then data
-    start_index = 0
-    for i, line in enumerate(lines):
-        if "------" in line:
-            start_index = i + 1
-            break
-            
-    # this happens if it doesn't find the header
-    if start_index == 0 or start_index >= len(lines):
-        print('no header found')
-        return data
-
-    for line in lines[start_index:]:
-        cols = line.split()
-        # make sure there are enough columns (if not it is not an actual col)
-        if len(cols) >= 3: 
-            try:
-                entry = {
-                    'alpha': float(cols[0]),
-                    'CL': float(cols[1]),
-                    'CD': float(cols[2]),
-                    
-                }
-                data.append(entry)
-            except ValueError:
-                continue
-    return data
-
-
-def aggregate_results(input_folder, working_dir, airfoil_name):
-    final_results_path = os.path.join(working_dir, f"{airfoil_name}_full_results_df.csv")
-    all_data = []
-
-
-    #name is like f"{airfoil_name}_polars_raw_{r_name}_T_{thick: .3f}_{U_inf_mph}_{RPM}.txt"
-    # Cerchiamo tutti i file .txt nella cartella
-    for filename in os.listdir(input_folder):
-        if ("polars_raw") in filename and airfoil_name in filename and filename.endswith(".txt"):
-            rpm = filename.split("_")[-1].split('.txt')[0] #very annoying, it contains the txt info 
-            thick_ratio = filename.split("_")[-3]
-            velocity = filename.split("_")[-2]
-            station_idx = filename.split("_")[-5]
-            full_path = os.path.join(input_folder, filename)
-            
-            # Usiamo il tuo parser originale
-            points = parse_xfoil_polar(full_path)
-            
-            for p in points:
-                p['station_idx'] = station_idx
-                p['U_inf'] = velocity
-                p['rpm'] = rpm
-                p['thick_ratio'] = thick_ratio
-                all_data.append(p)
-
-    if all_data:
-        keys = all_data[0].keys()
-        with open(final_results_path, 'w', newline='') as f:
-            dict_writer = csv.DictWriter(f, fieldnames=keys)
-            dict_writer.writeheader()
-            dict_writer.writerows(all_data)
-        print(f"\nSuccesso! Creato file unico con {len(all_data)} punti.")
-    else:
-        print("\nNessun dato trovato da aggregare.")
-    return all_data
-
-
-def run_xfoil(airfoil_path, alphas_xfoil, Re, thick, filename, working_dir):
-    # Nome del file temporaneo per i risultati
-
-    # first of all, I want to delete all the files that were generated in the past run
-    alpha_start, alpha_end, alpha_step = alphas_xfoil
-
-    scale_factor = thick / 0.1171   #to find new thickenss, use the one from clark
-    airfoil_dir, airfoil_name = os.path.split(airfoil_path)  #if they are in same folder as xfoil it is easier
-    res_path =  os.path.join(working_dir, filename)
-
-    temp_local_path = os.path.join(airfoil_dir, filename)
-    final_dest_path = os.path.join(working_dir, filename)
-    
-    if os.path.exists(temp_local_path): os.remove(temp_local_path)
-    if os.path.exists(final_dest_path): os.remove(final_dest_path)
-
-    print(airfoil_path)
-    if os.path.exists(res_path): os.remove(res_path)
-    if Re>150000:
-        # Comandi da inviare a XFOIL
-        commands = (
-        "PLOP\n"
-        "G\n"
-        "\n"
-        f"LOAD {airfoil_name}\n"
-        "GDES"
-        f"TFAC\n"
-        f"{scale_factor}\n"
-        f"{scale_factor}\n"
-        "PPAR\n"
-        "N 260\n"
-        "\n"
-        "\n"
-        "PANE\n"
-        "\n"
-        "OPER\n"
-        "MACH 0\n"
-        f"VISC {int(Re)}\n"
-        "ITER 200\n"
-        "VPAR\n"
-        "N 9\n"
-        "\n"
-        "PACC\n"
-        f"{filename}\n"
-        "\n"
-        f"ASEQ {alpha_start} {alpha_end} {alpha_step}\n"
-        "\n"
-        "QUIT\n"
-    )
-    else:
-
-        #found on github on calculations Cd0 = 0.09 for Re = 100 000, in my case even lower so Cd0 = 0.01 ? not too bad
-
-        commands = (
-        "PLOP\n"
-        "G\n"
-        "\n"
-        f"LOAD {airfoil_name}\n"
-        "GDES"
-        f"TFAC\n"
-        f"{scale_factor}\n"
-        f"{scale_factor}\n"
-        "PPAR\n"
-        "N 260\n"
-        "\n"
-        "\n"
-        "PANE\n"
-        "\n"
-        "OPER\n"
-        "MACH 0\n"
-        "ITER 200\n"
-        "PACC\n"
-        f"{filename}\n"
-        "\n"
-        f"ASEQ {alpha_start} {alpha_end} {alpha_step}\n"
-        "\n"
-        "QUIT\n"
-    )
-        print(f'{Re}')
-    
-    xfoil_path = r"C:\copiarefiles\XFOIL\xfoil_windows\working_version\xfoil.exe"
-    
-    
-    with open("xfoil_debug.inp", "w") as f:
-        f.write(commands)
-    f.close()
-    
-
-    with open("xfoil_debug.inp", "r") as f_input:
-        try:
-            proc = subprocess.run([xfoil_path],
-                                    stdin=f_input,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    text=True,
-                                    cwd=airfoil_dir)
-           
-            
-            # 3. SPOSTAMENTO FILE
-            if os.path.exists(temp_local_path):
-                shutil.move(temp_local_path, final_dest_path)
-                print(f"File {filename} generato e spostato in {working_dir}")
-                return True
-            else:
-                print(f"XFOIL non ha generato il file per Re={Re}. Convergenza fallita?")
-                return False
-
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            print(f"Timeout XFOIL per {filename}")
-            return False
-        except Exception as e:
-            print(f"Errore: {e}")
-            return False
-
+def gather_cl_cd_curves(df, alpha):
+    Cl = np.interp(alpha, df["alpha"], df["CL"])
+    Cd = np.interp(alpha, df["alpha"], df["CD"])
+    return Cl, Cd
 
 def retrieve_prop_data(csv_path):
 
@@ -221,105 +33,7 @@ def retrieve_prop_data(csv_path):
     station = dataset['STATION'] 
     return station, chord, thick_ratio, theta
 
-
-def create_polar_for_airfoil(airfoil_path, nu):
-    '''this script is used to calculate the polar for an airfoil, to pass the correct Cl and Cd
-    Ideally, we would also like to add the induction factor a, a' to the calculation.
-    Of course, this would mean acting iteratively (it is a mess) and Re would not change for the induced velocity
-    (it is ALWAYS) much smaller than the flow velocity. therefore we assume it to be a 2nd order effect and not consider it'''
-    # Loop di accumulo
-    final_results = []
-    #get the geometrical values for my real propeller
-    path_propeller_geo = r"C:\copiarefiles\aircraft_ady\assignments_material\assignment_5\prop_airfoil_char.csv"
-    station_inches, chord_dist_inches, thick_ratio, _ = retrieve_prop_data(path_propeller_geo)
-    inches_to_m = 2.54 / 100
-    station = station_inches * inches_to_m
-    chord_dist = chord_dist_inches * inches_to_m
-    path_test_campaign = r"C:\copiarefiles\aircraft_ady\assignments_material\assignment_5\full_measurement_campaign.csv"
-    measurement_campaign = pd.read_csv(path_test_campaign)
-    U_inf_series = measurement_campaign['V']
-    RPM_series = measurement_campaign['RPM']
-    results_path = r"C:\copiarefiles\aircraft_ady\assignments_material\assignment_5"
-    file_acc_path = os.path.join(results_path, 'temp_polars')
-
-    if not os.path.exists(file_acc_path):
-        os.makedirs(file_acc_path)
-
-    dir, airfoil_name = os.path.split(airfoil_path)
-    test_list = np.arange(0.02, 1.001, 0.02)
-    alpha_lst = [-4, 12, 0.2]  # same pattern as AS in xfoil
-    print(test_list)
-    for i in range(len(station)):
-
-        for U_inf_mph, RPM in zip(U_inf_series, RPM_series):
-            
-            U_inf = U_inf_mph * 0.447  #m/s
-            U_inf = round(U_inf, 3)
-            Omega = RPM / 60 * 2*np.pi  #rad/s
-            r = station.iloc[i]  #this is the value already in meters, from the file
-            #note there will be an error for the static data. since they don't use VTOT therec
-            r_name = station_inches.iloc[i]
-            thick = thick_ratio.iloc[i]
-            filename = f"{airfoil_name}_polars_raw_{r_name}_T_{thick: .3f}_{U_inf_mph}_{RPM}.txt" 
-            c = chord_dist.iloc[i]  #also in this case I have the chord, but I don't need it apart from the Re
-            
-            w = Omega  *  r
-            v = np.sqrt(U_inf**2 + w**2)  #here lies the approximation, no induced vels
-            Re  = (c * 0.75 ) * v / nu  # use half the chord length for Re (literature)
-            
-            successful_analysis = run_xfoil(airfoil_path, alpha_lst, Re, thick , filename, file_acc_path)
-            if successful_analysis:
-                print("OK")
-            else:
-                print('FAILED')
-
-    aggregate_results(file_acc_path, results_path, airfoil_name)
-
-
-def find_nearest_station(df, station, U_inf, rpm):
-    # filtra prima per U_inf e rpm (o anche solo rpm se vuoi)
-    df_sub = df[
-        (df["rpm"] == int(rpm)) &
-        (np.isclose(df["U_inf"], U_inf, atol=0.5))
-    ]
-
-    if df_sub.empty:
-        raise ValueError(f"Nessuna polare per U_inf={U_inf}, rpm={rpm}")
-
-    # distanza radiale
-    idx = (df_sub["station_idx"] - station).abs().idxmin()
-    return df_sub.loc[idx, "station_idx"]
-
-
-def interpolate_Cl_Cd_curves_viterna( alpha_real, alpha_data, Cl_data, Cd_data, AR):
-    
-    Cd0_Clarky = 0.023
-    #regression or corrections, remember that interp automatically manages the case where the data is already there 
-    if alpha_real > np.min(alpha_data) and alpha_real < np.max(alpha_data) : #it is "in the curve"
-        Cl_real = np.interp(alpha_real, alpha_data, Cl_data) #work with linear interp, since data is assumed to be "perfect" (from XFOIL)
-        Cd_real = np.interp(alpha_real, alpha_data, Cd_data)
-    else:
-        #params for viterna
-        Cd_max = 1.11 + 0.018* AR
-        idx_stall = alpha_data.argmax()
-        Cl_stall = Cl_data[idx_stall]
-        Cd_stall = Cd_data[idx_stall]
-        alpha_max = alpha_data[idx_stall]
-        alpha_max_rad = np.deg2rad(alpha_max)
-
-        alpha_real_rad = np.deg2rad(alpha_real)
-        A_1 = Cd_max/ 2
-        B_1 = Cd_max
-        A_2 = ( Cl_stall - Cd_max*np.sin(alpha_max_rad)*np.cos(alpha_max_rad)) *np.sin(alpha_max_rad)/(np.cos(alpha_max_rad)**2)
-        B_2 = (Cd_stall - Cd_max*(np.sin(alpha_max_rad)**2))/ np.cos(alpha_max_rad)
-        #here there is also an approximation, in this case we assume that the highest alpha is the stall (not necessarily true)
-        
-        
-        Cl_real = A_1 * np.sin(2 * alpha_real_rad) + A_2 * np.cos(alpha_real_rad)
-        Cd_real = B_1 * np.sin(alpha_real_rad)**2 + B_2 *np.cos(alpha_real_rad)
-    
-    return Cl_real, Cd_real
-    
+  
 
 def PrandtlTipRootCorrection(r_R, rootradius_R, tipradius_R, NBlades, phi):
     eps = 1e6
@@ -357,6 +71,8 @@ def find_omega_for_thrust(T_target, U_inf, Nb, chord_dist, theta_dist, dR, AR, c
 
 def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
     #remember, the Cl works with alfa, but the alfa and phi are NOT the same angle
+
+    search_df = pd.read_csv(r'C:\copiarefiles\aircraft_ady\assignments_material\assignment_5\test_polar.csv')
     U_inf_kph = max( U_inf / 0.44704, 0.01)
     iter = 0
     n = Omega / (2*np.pi)
@@ -385,16 +101,7 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
 
 
     #filter the df for the operating point, with the closest that we see
-    available_rpms = cl_cd_df['rpm'].unique()
-    closest_rpm = available_rpms[np.argmin(np.abs(available_rpms - rpm))]
-    df_rpm = cl_cd_df[cl_cd_df['rpm'] == closest_rpm]
-    available_uinf = df_rpm['U_inf'].unique()
-    closest_uinf = available_uinf[np.argmin(np.abs(available_uinf - U_inf_kph))]
-    df_op_point = df_rpm[df_rpm['U_inf'] == closest_uinf].copy()
-    if df_op_point.empty:
-        #means that maybe the we didn't have the analysis
-        print(f'Warning: No analysis present for the case U_inf = {U_inf_kph}, rpm = {rpm}')
-        return 0,0,0,0,0,0,0,0
+    
     Thrust = 0
     Torque = 0
 
@@ -411,23 +118,8 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
         c = chord_dist[i]
         
 
-        #now we search for the polars (outside of the while, faster) based on the closest to station
-        station_req = r / inches_to_m
-        idx = (df_op_point['station_idx'] - station_req).abs().idxmin()
-        station_use = df_op_point.loc[idx, "station_idx"]  #we select the correct index of the df
-        df_polar = df_op_point[df_op_point['station_idx'] == station_use] #mask
         
-        alpha_data = df_polar['alpha'].values
-        Cl_data = df_polar['CL'].values
-        Cd_data = df_polar['CD'].values
 
-        #now we need to handle the inviscid case (Re was too low for calculation)
-        if (Cd_data == 0).all():
-            #use the simple version
-            Cd0_Clarky = 0.023
-            Cd_data = Cd0_Clarky + 0.045*(Cl_data**2)   #the classic formula
-        
-        #now we enter the loop 
         iter = 0
         converged = False
         while iter < n_iterations and converged == False:
@@ -450,7 +142,7 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             alfa_search = np.rad2deg(alfa_rad)
           
 
-            Cl, Cd = interpolate_Cl_Cd_curves_viterna(alfa_search, alpha_data, Cl_data, Cd_data, AR)
+            Cl, Cd = gather_cl_cd_curves(search_df, alfa_search)
 
                
             Lift = Cl * 0.5 * rho * V_r**2 * c  #per unit area? or not?
@@ -465,13 +157,6 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             dT  = Nb * dF_axial   #not only infinitesimal force, but also radius (needs to be multiplied)
             dQ = Nb*dF_azimuthal * r
             # Ct locale basato sulla sezione (annulus)
-
-            sigma_prime = (Nb * c) / (2 * np.pi * r)
-
-            Cy = Cl *np.cos(phi) - Cd * np.sin(phi)
-            Cx = Cl *np.sin(phi) + Cd * np.cos(phi)
-            eps = 1e-9
-            
             
             F, _, _ = PrandtlTipRootCorrection(r/prop_radius, hub_radius/prop_radius, 1.0, Nb, phi)
 
@@ -479,10 +164,10 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
             # now we have a difference, can use formulas from rotoe/wake or course. we will use course
             #the one from the course are from mass flow
 
-            denom_a = abs(4 * F * np.sin(phi)**2 - sigma_prime*Cy) + eps
-            denom_aprime = abs(4 * F * np.sin(phi) *np.cos(phi) + sigma_prime*Cx )+ eps
-            a_guess = sigma_prime*Cy / denom_a
-            a_prime_guess = sigma_prime*Cx / denom_aprime
+            a_guess = dT / (2 * 2*np.pi * r * rho * U_inf**2 * (1 + a[i]) * F )
+
+            a_prime_guess = dQ / (2*2 *np.pi * r**3 * Omega   * rho * U_inf *  (1+a[i])* F)
+
             
     
 
@@ -491,8 +176,8 @@ def solve_BEM(Nb, chord_dist, theta_dist, dR, AR, U_inf, Omega, cl_cd_df):
         
             a_prime_new = 0.7*a_prime[i] + 0.3 * a_prime_guess
 
-            a_new = np.clip(a_new, -0.1, 100000)
-            a_prime_new = np.clip(a_prime_new, -0.05, 0.15)
+            a_new = np.clip(a_new, -0.2, 10000)
+            a_prime_new = np.clip(a_prime_new, -1.0, 1.0)
         
             a_comp[i] = a[i]
             a_prime_comp[i] = a_prime[i]
@@ -523,7 +208,7 @@ def prop_definition():
     #prop definition based on the 22x10 PROPELLER
     #basde on the definition, the first "airfoil" is here 3.1329, the first measured station (hub transition at 3.13)
     inches_to_m = 2.54 / 100
-    n_segments = 15
+    n_segments = 30
     
 
     hub_rad = 3.13 * inches_to_m
@@ -564,7 +249,7 @@ def get_air_quantities():
 if __name__ == '__main__':
 
     airfoil_name, Nb, _, Cd0, chord_dist, theta_dist, dR, AR, n_segments = prop_definition()
-    n_iterations = 50
+    n_iterations = 500
     cl_cd_df_path = r"C:\copiarefiles\aircraft_ady\assignments_material\assignment_5\Clark_Y_full_results_df.csv"
     cl_cd_df = pd.read_csv(cl_cd_df_path)
 
